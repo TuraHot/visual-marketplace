@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # 🌐 Visual Marketplace
 
 <p align="center">
