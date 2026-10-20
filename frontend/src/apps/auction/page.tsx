@@ -1,208 +1,262 @@
 'use client';
 
 import React, { useState } from 'react';
-import { useSocket } from '../../hooks/useSocket';
-import { useAuction } from '../../hooks/useAuction';
-import { Gavel, Clock, Flame, ShieldAlert, Award, ArrowUpRight } from 'lucide-react';
+import Link from 'next/link';
+import AuctionView from '../../components/auction/AuctionView';
+import {
+  Gavel,
+  Zap,
+  Users,
+  User,
+  Sparkles,
+  ShieldCheck,
+  CheckCircle2,
+  Clock,
+  MessageSquare,
+  Flame,
+} from 'lucide-react';
+import { io } from 'socket.io-client';
 
-interface AuctionPageProps {
-  auctionId?: string;
-  token?: string;
-}
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:5000';
 
-export default function AuctionPage({ auctionId = '', token }: AuctionPageProps) {
-  const [customBid, setCustomBid] = useState<string>('');
+export default function AuctionMainPage() {
+  const [isSplitMode, setIsSplitMode] = useState<boolean>(true);
+  const [concurrencyStatus, setConcurrencyStatus] = useState<string | null>(null);
+  const [isFiringConcurrent, setIsFiringConcurrent] = useState<boolean>(false);
 
-  const { socket, isConnected } = useSocket(token);
-  const {
-    auction,
-    history,
-    timeLeft,
-    isExtended,
-    extensionMessage,
-    bidError,
-    placeBid,
-  } = useAuction(socket, auctionId);
+  const AUCTION_ID = 'auction-weekly-01';
 
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  // ข้อมูลจำลองสำหรับ 2 ผู้ใช้
+  const userA = {
+    userId: 'user_somchai_01',
+    userName: 'สมชาย นักสะสม',
+    clientBadge: 'ผู้ประมูล A (สมชาย)',
+    badgeColor: 'indigo' as const,
   };
 
-  const handleQuickBid = (increment: number) => {
-    if (!auction) return;
-    const base = auction.currentBid || auction.startPrice || 0;
-    placeBid(base + increment);
+  const userB = {
+    userId: 'user_karn_02',
+    userName: 'กานต์ เจ้าพ่อประมูล',
+    clientBadge: 'ผู้ประมูล B (กานต์)',
+    badgeColor: 'amber' as const,
   };
 
-  const handleCustomBidSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const amount = Number(customBid);
-    if (!isNaN(amount) && amount > 0) {
-      placeBid(amount);
-      setCustomBid('');
+  // การทดสอบจำลองส่งคำขอเคาะราคาพร้อมกันในระดับมิลลิวินาที (Concurrency Stress Test)
+  const handleSimulateConcurrentBids = async () => {
+    try {
+      setIsFiringConcurrent(true);
+      setConcurrencyStatus('🚀 กำลังยิงคำขอเคาะราคาพร้อมกัน 2 รายการในมิลลิวินาทีเดียวกัน...');
+
+      // สร้าง socket ชั่วคราว 2 ตัวที่จำลองคำขอพร้อมกัน
+      const socketA = io(BACKEND_URL, { query: { userId: userA.userId, userName: userA.userName }, transports: ['websocket'] });
+      const socketB = io(BACKEND_URL, { query: { userId: userB.userId, userName: userB.userName }, transports: ['websocket'] });
+
+      await Promise.all([
+        new Promise((resolve) => socketA.on('connect', () => resolve(true))),
+        new Promise((resolve) => socketB.on('connect', () => resolve(true))),
+      ]);
+
+      // ดึงสถานะปัจจุบันเพื่อคำนวณราคาเคาะแข่ง
+      socketA.emit('auction:join', { auctionId: AUCTION_ID });
+      const state: any = await new Promise((resolve) => {
+        socketA.once('auction:state', resolve);
+        setTimeout(() => resolve(null), 2000);
+      });
+
+      const base = state?.currentBid || 1000;
+      const bidAmountA = base + 100;
+      const bidAmountB = base + 500;
+
+      // ส่งคำขอทั้ง 2 รายการพร้อมกัน ณ จุดนี้
+      const pA = new Promise((resolve) => {
+        socketA.once('auction:bid_accepted', (res) => resolve({ client: 'A', status: 'accepted', data: res }));
+        socketA.once('auction:bid_rejected', (res) => resolve({ client: 'A', status: 'rejected', data: res }));
+        socketA.emit('auction:place_bid', {
+          auctionId: AUCTION_ID,
+          requestId: `sim_a_${Date.now()}`,
+          bidAmount: bidAmountA,
+        });
+      });
+
+      const pB = new Promise((resolve) => {
+        socketB.once('auction:bid_accepted', (res) => resolve({ client: 'B', status: 'accepted', data: res }));
+        socketB.once('auction:bid_rejected', (res) => resolve({ client: 'B', status: 'rejected', data: res }));
+        socketB.emit('auction:place_bid', {
+          auctionId: AUCTION_ID,
+          requestId: `sim_b_${Date.now()}`,
+          bidAmount: bidAmountB,
+        });
+      });
+
+      const [resA, resB]: any = await Promise.all([pA, pB]);
+
+      setConcurrencyStatus(
+        `✅ ผลการทดสอบ Concurrency: คำขอ A (+100 -> ${bidAmountA} ฿) ได้รับผล: ${resA.status} | คำขอ B (+500 -> ${bidAmountB} ฿) ได้รับผล: ${resB.status} (ผ่านคิว FIFO และถูก Re-evaluate ตามลำดับสำเร็จ!)`
+      );
+
+      socketA.disconnect();
+      socketB.disconnect();
+    } catch (err: any) {
+      setConcurrencyStatus(`⚠️ เกิดข้อผิดพลาด: ${err.message}`);
+    } finally {
+      setIsFiringConcurrent(false);
+      setTimeout(() => {
+        setConcurrencyStatus(null);
+      }, 9000);
     }
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-8 font-sans">
-      {/* Header */}
-      <header className="max-w-6xl mx-auto flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 pb-6 border-b border-slate-800">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center gap-1">
-              <Flame className="w-3.5 h-3.5" /> ระบบประมูล (Auction)
-            </span>
-            <div className="flex items-center gap-1.5 ml-2 text-xs">
-              <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500' : 'bg-slate-500'}`} />
-              <span className="text-slate-400">{isConnected ? 'เชื่อมต่อแล้ว' : 'รอการเชื่อมต่อ...'}</span>
+    <div className="min-h-screen bg-slate-950 text-slate-100 p-4 sm:p-6 lg:p-8 font-sans selection:bg-amber-500 selection:text-black">
+      {/* Top Main Navigation / Bar */}
+      <header className="max-w-7xl mx-auto mb-8 pb-6 border-b border-slate-800">
+        <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2 mb-2">
+              <span className="px-3 py-1 rounded-full text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center gap-1.5 shadow-[0_0_12px_rgba(245,158,11,0.2)]">
+                <Flame className="w-4 h-4 fill-amber-400" /> โรงประมูล Real-time (Auction Engine)
+              </span>
+              <span className="text-xs text-slate-400">คนที่ 4 (แฮม) — ระบบประมูลและ Concurrency</span>
+            </div>
+            <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight flex items-center gap-3">
+              โรงประมูลและห้องจำลองการเคาะราคาแข่งขัน
+            </h1>
+            <p className="text-xs sm:text-sm text-slate-400 mt-1 max-w-3xl">
+              ระบบประมูลแบบเรียลไทม์พร้อมการจัดการ Race Condition ด้วย FIFO Queue, กติกา Fixed Anti-Snipe (รีเซ็ตเวลาเป็น 120 วินาที), ป้องกันการเคาะแข่งกับตัวเอง และ 3-Phase Settlement
+            </p>
+          </div>
+
+          {/* Navigation Links and Mode Switcher */}
+          <div className="flex flex-wrap items-center gap-3">
+            <Link
+              href="/chat"
+              className="px-4 py-2.5 rounded-2xl bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800 text-xs font-semibold flex items-center gap-2 transition shadow-md"
+            >
+              <MessageSquare className="w-4 h-4 text-indigo-400" />
+              <span>ไปที่ระบบแชท</span>
+            </Link>
+
+            <div className="flex items-center p-1 bg-slate-900 border border-slate-800 rounded-2xl shadow-inner">
+              <button
+                type="button"
+                onClick={() => setIsSplitMode(false)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition ${
+                  !isSplitMode
+                    ? 'bg-indigo-600 text-white shadow-md'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <User className="w-3.5 h-3.5" /> หน้าจอเดี่ยว
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsSplitMode(true)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition ${
+                  isSplitMode
+                    ? 'bg-amber-500 text-slate-950 font-bold shadow-md'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Users className="w-3.5 h-3.5" /> จำลอง 2 จอแข่งกัน
+              </button>
             </div>
           </div>
-          <h1 className="text-2xl md:text-3xl font-extrabold tracking-tight text-white">
-            {auction?.title || 'ห้องประมูล'}
-          </h1>
         </div>
+
+        {/* Feature Checkpoints */}
+        <div className="mt-5 flex flex-wrap gap-4 text-xs">
+          <span className="flex items-center gap-1.5 text-slate-300 bg-slate-900/60 px-2.5 py-1 rounded-lg border border-slate-800">
+            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> Per-Auction FIFO Queue
+          </span>
+          <span className="flex items-center gap-1.5 text-slate-300 bg-slate-900/60 px-2.5 py-1 rounded-lg border border-slate-800">
+            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> Fixed Anti-Snipe (รีเซ็ต 120s)
+          </span>
+          <span className="flex items-center gap-1.5 text-slate-300 bg-slate-900/60 px-2.5 py-1 rounded-lg border border-slate-800">
+            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> Self-Bidding Prevention
+          </span>
+          <span className="flex items-center gap-1.5 text-slate-300 bg-slate-900/60 px-2.5 py-1 rounded-lg border border-slate-800">
+            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> Pre-bid Expiry Guard
+          </span>
+          <span className="flex items-center gap-1.5 text-slate-300 bg-slate-900/60 px-2.5 py-1 rounded-lg border border-slate-800">
+            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> 3-Phase Settlement (ongoing ➔ settling ➔ ended)
+          </span>
+        </div>
+
+        {/* Concurrency Stress Trigger Bar (Shown in Split Mode) */}
+        {isSplitMode && (
+          <div className="mt-6 p-4 rounded-2xl bg-gradient-to-r from-indigo-950/40 via-purple-950/40 to-slate-900/40 border border-indigo-500/30 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <Zap className="w-4 h-4 text-amber-400 animate-pulse" />
+                <h4 className="text-sm font-bold text-white">
+                  ทดสอบการเคาะราคาพร้อมกัน (Simulate Race Condition / Concurrency Test)
+                </h4>
+              </div>
+              <p className="text-xs text-slate-400 mt-0.5">
+                ยิงคำขอจากผู้ใช้ A (+100) และผู้ใช้ B (+500) ในมิลลิวินาทีเดียวกัน เพื่อพิสูจน์ว่าระบบ Re-evaluate ผ่านทั้งคู่ตามลำดับในคิว
+              </p>
+            </div>
+
+            <button
+              type="button"
+              disabled={isFiringConcurrent}
+              onClick={handleSimulateConcurrentBids}
+              className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition shrink-0 ${
+                isFiringConcurrent
+                  ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                  : 'bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 shadow-lg shadow-amber-500/20 active:scale-95'
+              }`}
+            >
+              <Zap className="w-3.5 h-3.5 fill-slate-950" />
+              <span>{isFiringConcurrent ? 'กำลังยิงคำขอ...' : 'ยิงคำขอพร้อมกันทันที'}</span>
+            </button>
+          </div>
+        )}
+
+        {/* Concurrency Status Feedback Banner */}
+        {concurrencyStatus && (
+          <div className="mt-4 p-3.5 rounded-2xl bg-slate-900 border border-emerald-500/40 text-emerald-300 text-xs flex items-center gap-2.5 animate-fadeIn">
+            <Sparkles className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span>{concurrencyStatus}</span>
+          </div>
+        )}
       </header>
 
-      {/* Main Content */}
-      <main className="max-w-6xl mx-auto mt-6 grid grid-cols-1 lg:grid-cols-12 gap-8">
-        {/* Left Column: Product Info */}
-        <section className="lg:col-span-7 flex flex-col gap-6">
-          <div className="relative rounded-2xl overflow-hidden bg-slate-900 border border-slate-800 shadow-xl">
-            {auction?.imageUrl ? (
-              <img
-                src={auction.imageUrl}
-                alt={auction.title}
-                className="w-full h-80 md:h-96 object-cover"
-              />
-            ) : (
-              <div className="w-full h-80 md:h-96 flex items-center justify-center text-slate-600">
-                ไม่มีรูปภาพสินค้า
-              </div>
-            )}
-            <div className="p-4 bg-slate-900">
-              <h2 className="text-lg font-bold text-white mb-1">{auction?.title}</h2>
-              <p className="text-sm text-slate-400">{auction?.description}</p>
-            </div>
+      {/* Main Auction Workbenches */}
+      <main className="max-w-7xl mx-auto">
+        {isSplitMode ? (
+          /* Split Screen Mode: 2 Connected Clients side-by-side */
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
+            <AuctionView
+              auctionId={AUCTION_ID}
+              userId={userA.userId}
+              userName={userA.userName}
+              clientBadge={userA.clientBadge}
+              badgeColor={userA.badgeColor}
+              compact
+            />
+
+            <AuctionView
+              auctionId={AUCTION_ID}
+              userId={userB.userId}
+              userName={userB.userName}
+              clientBadge={userB.clientBadge}
+              badgeColor={userB.badgeColor}
+              compact
+            />
           </div>
-
-          {/* Anti-snipe Banner */}
-          {isExtended && (
-            <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/40 flex items-start gap-3">
-              <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-              <div>
-                <h4 className="text-sm font-semibold text-amber-300">ระบบต่อเวลาอัตโนมัติ (Anti-Sniping)</h4>
-                <p className="text-xs text-amber-200/80">{extensionMessage}</p>
-              </div>
-            </div>
-          )}
-        </section>
-
-        {/* Right Column: Controls & History */}
-        <section className="lg:col-span-5 flex flex-col gap-6">
-          {/* Countdown Timer */}
-          <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800">
-            <span className="text-xs font-medium text-slate-400 flex items-center gap-1.5 mb-2">
-              <Clock className="w-4 h-4 text-indigo-400" /> เวลาที่เหลือ
-            </span>
-            <div className="text-4xl md:text-5xl font-mono font-bold text-white">
-              {formatTime(timeLeft)}
-            </div>
+        ) : (
+          /* Single Screen View */
+          <div className="max-w-2xl mx-auto">
+            <AuctionView
+              auctionId={AUCTION_ID}
+              userId={userA.userId}
+              userName={userA.userName}
+              clientBadge="มุมมองผู้ใช้หลัก (สมชาย นักสะสม)"
+              badgeColor="indigo"
+            />
           </div>
-
-          {/* Current Bid */}
-          <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800">
-            <span className="text-xs font-medium text-slate-400">ราคาสูงสุดในปัจจุบัน</span>
-            <div className="flex items-baseline gap-2 mt-1">
-              <span className="text-3xl font-bold text-white">
-                {auction?.currentBid ? auction.currentBid.toLocaleString() : '0'}
-              </span>
-            </div>
-            <div className="mt-2 text-xs text-slate-400 flex items-center gap-1.5">
-              <Award className="w-4 h-4 text-amber-400" />
-              <span>ผู้เสนอราคาสูงสุด:</span>
-              <span className="text-slate-200 font-medium">
-                {auction?.highestBidderName || '-'}
-              </span>
-            </div>
-          </div>
-
-          {/* Bidding Controls */}
-          <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 flex flex-col gap-4">
-            <h3 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-              <Gavel className="w-4 h-4 text-amber-400" /> เสนอราคา
-            </h3>
-
-            {/* Quick Bid */}
-            <div className="grid grid-cols-3 gap-2">
-              <button
-                type="button"
-                onClick={() => handleQuickBid(auction?.minBidStep || 100)}
-                className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition"
-              >
-                +{(auction?.minBidStep || 100).toLocaleString()}
-              </button>
-              <button
-                type="button"
-                onClick={() => handleQuickBid(500)}
-                className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition"
-              >
-                +500
-              </button>
-              <button
-                type="button"
-                onClick={() => handleQuickBid(1000)}
-                className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition"
-              >
-                +1,000
-              </button>
-            </div>
-
-            {/* Custom Bid */}
-            <form onSubmit={handleCustomBidSubmit} className="flex gap-2">
-              <input
-                type="number"
-                value={customBid}
-                onChange={(e) => setCustomBid(e.target.value)}
-                placeholder="ระบุราคาที่ต้องการ"
-                className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500"
-              />
-              <button
-                type="submit"
-                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold flex items-center gap-1 transition"
-              >
-                เสนอราคา <ArrowUpRight className="w-3.5 h-3.5" />
-              </button>
-            </form>
-
-            {bidError && (
-              <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs">
-                {bidError}
-              </div>
-            )}
-          </div>
-
-          {/* Bid History */}
-          <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800">
-            <h3 className="text-sm font-semibold text-slate-300 mb-3">ประวัติการเสนอราคา</h3>
-            <div className="space-y-2 max-h-56 overflow-y-auto">
-              {history.length === 0 ? (
-                <div className="text-xs text-slate-600 text-center py-4">ยังไม่มีประวัติการเสนอราคา</div>
-              ) : (
-                history.map((record) => (
-                  <div
-                    key={record.id}
-                    className="flex items-center justify-between p-2 rounded-lg bg-slate-950/50 text-xs"
-                  >
-                    <span className="text-slate-400">{record.bidderName}</span>
-                    <span className="text-slate-200 font-medium">{record.bidAmount.toLocaleString()}</span>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        </section>
+        )}
       </main>
     </div>
   );

@@ -3,19 +3,32 @@ export interface ChatMessage {
   roomId: string;
   senderId: string;
   senderName: string;
-  receiverId: string;
   message: string;
   createdAt: string;
 }
 
-export interface SendMessagePayload {
+export interface ChatSendPayload {
   sellerId: string;
   buyerId: string;
+  senderId: string;
+  senderName: string;
   message: string;
 }
 
-export interface ChatSessionCheck {
-  canChat: boolean;
-  reason?: string;
-  shopCoordinates?: { x: number; y: number };
+export interface ChatJoinPayload {
+  sellerId: string;
+  buyerId: string;
+  userId: string;
+}
+
+export interface ChatTypingPayload {
+  roomId: string;
+  userId: string;
+  userName: string;
+  isTyping: boolean;
+}
+
+export interface ChatError {
+  code: 'EMPTY_MESSAGE' | 'MESSAGE_TOO_LONG' | 'INVALID_PAYLOAD' | 'NOT_IN_ROOM' | 'SHOP_CLOSED';
+  message: string;
 }
